@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.playwright-mcp/
+
+# Large downloaded HYRAS NetCDF source data.
+data/raw/
+*.nc

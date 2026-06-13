@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dwd-hyras-tasmax"
+version = "0.1.0"
+description = "Download, process, and plot DWD HYRAS TASMAX temperature trends for Germany."
+requires-python = ">=3.11"
+dependencies = [
+    "xarray",
+    "netCDF4",
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "requests",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+dwd-hyras-tasmax = "dwd_hyras.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
