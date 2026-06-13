@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import glob as _glob
 from pathlib import Path
 
 from dwd_hyras.download import DWD_HYRAS_TASMAX_URL, download_files, list_netcdf_urls
@@ -71,7 +72,10 @@ def main() -> None:
 def _expand_inputs(inputs: list[str]) -> list[Path]:
     paths: list[Path] = []
     for item in inputs:
-        matches = sorted(Path().glob(item)) if any(char in item for char in "*?[") else [Path(item)]
+        if any(char in item for char in "*?["):
+            matches = [Path(p) for p in sorted(_glob.glob(item))]
+        else:
+            matches = [Path(item)]
         paths.extend(matches)
 
     if not paths:
@@ -85,12 +89,8 @@ def _threshold_range(min_threshold: float, max_threshold: float, step: float) ->
     if max_threshold < min_threshold:
         raise ValueError("--max-threshold must be greater than or equal to --min-threshold.")
 
-    values: list[float] = []
-    current = min_threshold
-    while current <= max_threshold + (step / 10):
-        values.append(round(current, 1))
-        current += step
-    return values
+    n_steps = round((max_threshold - min_threshold) / step)
+    return sorted({round(min_threshold + i * step, 1) for i in range(n_steps + 1)})
 
 
 if __name__ == "__main__":

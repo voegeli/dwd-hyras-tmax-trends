@@ -9,20 +9,27 @@ import xarray as xr
 
 DEFAULT_VARIABLE_CANDIDATES = ("tasmax", "tasmax_hyras", "temperature", "tmax")
 
+_KELVIN_UNITS = {"k", "kelvin"}
+_CELSIUS_UNITS = {"c", "degc", "degree_celsius", "degrees_celsius", "celsius", "°c"}
+
 
 def normalize_to_celsius(values: xr.DataArray) -> xr.DataArray:
     """Return daily maximum temperature values in degrees Celsius."""
     units = str(values.attrs.get("units", "")).strip().lower()
-    if units in {"k", "kelvin"}:
+    if units in _KELVIN_UNITS:
         result = values - 273.15
         result.attrs.update(values.attrs)
         result.attrs["units"] = "degC"
         return result
-
-    result = values.copy(deep=False)
-    if units in {"", "c", "degc", "degree_celsius", "degrees_celsius", "celsius", "°c"}:
+    if units in _CELSIUS_UNITS:
+        result = values.copy(deep=False)
         result.attrs["units"] = "degC"
-    return result
+        return result
+    raise ValueError(
+        f"Unrecognized temperature units {values.attrs.get('units')!r}. "
+        "Expected Kelvin (e.g. 'K') or Celsius (e.g. 'degC'). "
+        "Set the 'units' attribute on the DataArray before calling."
+    )
 
 
 def open_tasmax(

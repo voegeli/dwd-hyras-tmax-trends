@@ -72,7 +72,6 @@ def _plot_bar(
     ax.set_title(title)
     ax.set_xlabel("Year")
     ax.set_ylabel(ylabel)
-    ax.set_ylim(0, 50)
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(output, dpi=150)

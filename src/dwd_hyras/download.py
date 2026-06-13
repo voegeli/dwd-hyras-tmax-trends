@@ -48,20 +48,26 @@ def download_files(urls: list[str], output_dir: str | Path, overwrite: bool = Fa
             downloaded.append(target)
             continue
 
-        with requests.get(url, stream=True, timeout=120) as response:
-            response.raise_for_status()
-            total = int(response.headers.get("content-length", "0"))
-            with target.open("wb") as file_obj, tqdm(
-                total=total,
-                unit="B",
-                unit_scale=True,
-                desc=target.name,
-            ) as progress:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if not chunk:
-                        continue
-                    file_obj.write(chunk)
-                    progress.update(len(chunk))
+        tmp = target.with_name(target.name + ".tmp")
+        try:
+            with requests.get(url, stream=True, timeout=120) as response:
+                response.raise_for_status()
+                total = int(response.headers.get("content-length") or "0")
+                with tmp.open("wb") as file_obj, tqdm(
+                    total=total,
+                    unit="B",
+                    unit_scale=True,
+                    desc=target.name,
+                ) as progress:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        file_obj.write(chunk)
+                        progress.update(len(chunk))
+            tmp.rename(target)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
         downloaded.append(target)
 
     return downloaded

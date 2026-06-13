@@ -25,7 +25,7 @@ def compute_threshold_day_counts(
         raise ValueError("TASMAX data must include at least one spatial dimension.")
 
     daily_max = tasmax_c.max(dim=spatial_dims, skipna=True).load()
-    years = pd.DatetimeIndex(daily_max["time"].values).year.astype(int)
+    years = daily_max["time"].dt.year.values.astype(int)
     unique_years = np.unique(years)
 
     data: dict[str, np.ndarray] = {"year": unique_years}
@@ -59,7 +59,14 @@ def compute_threshold_day_counts_from_files(
     if not frames:
         raise ValueError("At least one NetCDF path is required.")
 
-    return pd.concat(frames, ignore_index=True).sort_values("year").reset_index(drop=True)
+    combined = pd.concat(frames, ignore_index=True).sort_values("year").reset_index(drop=True)
+    duplicate_years = combined.loc[combined.duplicated(subset=["year"]), "year"].unique().tolist()
+    if duplicate_years:
+        raise ValueError(
+            f"Overlapping years found in input files: {sorted(duplicate_years)}. "
+            "Each year must appear in exactly one input file."
+        )
+    return combined
 
 
 def write_threshold_counts_csv(metrics: pd.DataFrame, output_path: str | Path) -> None:
