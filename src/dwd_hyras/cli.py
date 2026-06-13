@@ -40,6 +40,8 @@ def main() -> None:
     threshold_parser.add_argument("--min-threshold", type=float, default=25.0)
     threshold_parser.add_argument("--max-threshold", type=float, default=42.0)
     threshold_parser.add_argument("--step", type=float, default=0.5)
+    threshold_parser.add_argument("--city-buffer-km", type=float, default=20.0)
+    threshold_parser.add_argument("--airport-buffer-km", type=float, default=10.0)
 
     args = parser.parse_args()
     if args.command == "download":
@@ -54,7 +56,13 @@ def main() -> None:
 
     if args.command == "threshold-page":
         thresholds = _threshold_range(args.min_threshold, args.max_threshold, args.step)
-        metrics = compute_threshold_day_counts_from_files(input_paths, thresholds, variable=args.variable)
+        metrics = compute_threshold_day_counts_from_files(
+            input_paths,
+            thresholds,
+            variable=args.variable,
+            city_buffer_km=args.city_buffer_km,
+            airport_buffer_km=args.airport_buffer_km,
+        )
         write_threshold_counts_csv(metrics, output_dir / "hot_days_threshold_counts.csv")
         write_threshold_interactive_html(metrics, output_dir / "hot_days_threshold_interactive.html")
         return
