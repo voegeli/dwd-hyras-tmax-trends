@@ -21,13 +21,52 @@ def test_compute_threshold_day_counts_handles_cftime_times():
     assert result.iloc[0]["days_ge_30_0c"] == 2
 
 
+def test_compute_threshold_day_counts_applies_scenario_masks():
+    tasmax = xr.DataArray(
+        np.array(
+            [
+                [[31.0, 29.0], [28.0, 27.0]],
+                [[29.0, 28.0], [36.0, 27.0]],
+            ]
+        ),
+        dims=["time", "y", "x"],
+        coords={"time": pd.to_datetime(["1951-06-01", "1951-06-02"])},
+        attrs={"units": "degC"},
+    )
+    all_cells = xr.DataArray(
+        np.array([[True, True], [True, True]]),
+        dims=["y", "x"],
+    )
+    exclude_hot_cells = xr.DataArray(
+        np.array([[False, True], [False, True]]),
+        dims=["y", "x"],
+    )
+
+    result = compute_threshold_day_counts(
+        tasmax,
+        thresholds=[30.0],
+        scenario_masks={
+            "all": all_cells,
+            "without_peaks": exclude_hot_cells,
+        },
+    )
+
+    row = result.iloc[0]
+    assert row["days_ge_30_0c"] == 2
+    assert row["days_ge_30_0c__without_peaks"] == 0
+
+
 def test_compute_threshold_day_counts_from_files_raises_on_duplicate_years():
     from unittest.mock import MagicMock, patch
 
     tasmax = xr.DataArray(
         np.array([[31.0, 32.0]]),
         dims=["time", "x"],
-        coords={"time": pd.to_datetime(["1951-06-01"])},
+        coords={
+            "time": pd.to_datetime(["1951-06-01"]),
+            "lat": ("x", np.array([50.0, 51.0])),
+            "lon": ("x", np.array([8.0, 9.0])),
+        },
         attrs={"units": "degC"},
     )
     fake_ds = tasmax.to_dataset(name="tasmax")

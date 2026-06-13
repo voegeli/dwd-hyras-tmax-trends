@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -11,9 +12,55 @@ import xarray as xr
 from dwd_hyras.process import DEFAULT_VARIABLE_CANDIDATES, normalize_to_celsius
 
 
+@dataclass(frozen=True)
+class ExclusionFeature:
+    name: str
+    lat: float
+    lon: float
+
+
+DEFAULT_CITY_FEATURES = (
+    ExclusionFeature("Berlin", 52.5200, 13.4050),
+    ExclusionFeature("Hamburg", 53.5511, 9.9937),
+    ExclusionFeature("Munich", 48.1351, 11.5820),
+    ExclusionFeature("Cologne", 50.9375, 6.9603),
+    ExclusionFeature("Frankfurt am Main", 50.1109, 8.6821),
+    ExclusionFeature("Stuttgart", 48.7758, 9.1829),
+    ExclusionFeature("Dusseldorf", 51.2277, 6.7735),
+    ExclusionFeature("Leipzig", 51.3397, 12.3731),
+    ExclusionFeature("Dortmund", 51.5136, 7.4653),
+    ExclusionFeature("Essen", 51.4556, 7.0116),
+    ExclusionFeature("Bremen", 53.0793, 8.8017),
+    ExclusionFeature("Dresden", 51.0504, 13.7373),
+    ExclusionFeature("Hanover", 52.3759, 9.7320),
+    ExclusionFeature("Nuremberg", 49.4521, 11.0767),
+    ExclusionFeature("Duisburg", 51.4344, 6.7623),
+)
+
+
+DEFAULT_AIRPORT_FEATURES = (
+    ExclusionFeature("Frankfurt Airport", 50.0379, 8.5622),
+    ExclusionFeature("Munich Airport", 48.3538, 11.7861),
+    ExclusionFeature("Berlin Brandenburg Airport", 52.3667, 13.5033),
+    ExclusionFeature("Dusseldorf Airport", 51.2895, 6.7668),
+    ExclusionFeature("Hamburg Airport", 53.6304, 9.9882),
+    ExclusionFeature("Cologne Bonn Airport", 50.8659, 7.1427),
+    ExclusionFeature("Stuttgart Airport", 48.6899, 9.2219),
+    ExclusionFeature("Hanover Airport", 52.4611, 9.6851),
+    ExclusionFeature("Nuremberg Airport", 49.4987, 11.0669),
+    ExclusionFeature("Leipzig Halle Airport", 51.4239, 12.2364),
+    ExclusionFeature("Dortmund Airport", 51.5183, 7.6122),
+    ExclusionFeature("Bremen Airport", 53.0475, 8.7867),
+    ExclusionFeature("Dresden Airport", 51.1328, 13.7672),
+    ExclusionFeature("Muenster Osnabrueck Airport", 52.1346, 7.6848),
+    ExclusionFeature("Karlsruhe Baden-Baden Airport", 48.7793, 8.0805),
+)
+
+
 def compute_threshold_day_counts(
     tasmax_c: xr.DataArray,
     thresholds: Iterable[float],
+    scenario_masks: dict[str, xr.DataArray] | None = None,
 ) -> pd.DataFrame:
     """Count days per year where any valid grid cell reaches each threshold."""
     if "time" not in tasmax_c.dims:
@@ -24,18 +71,24 @@ def compute_threshold_day_counts(
     if not spatial_dims:
         raise ValueError("TASMAX data must include at least one spatial dimension.")
 
-    daily_max = tasmax_c.max(dim=spatial_dims, skipna=True).load()
-    years = daily_max["time"].dt.year.values.astype(int)
+    masks = scenario_masks or {"all": _full_spatial_mask(tasmax_c, spatial_dims)}
+    daily_max_by_scenario = {
+        scenario: tasmax_c.where(mask).max(dim=spatial_dims, skipna=True).load()
+        for scenario, mask in masks.items()
+    }
+    first_daily_max = next(iter(daily_max_by_scenario.values()))
+    years = first_daily_max["time"].dt.year.values.astype(int)
     unique_years = np.unique(years)
 
     data: dict[str, np.ndarray] = {"year": unique_years}
-    daily_values = daily_max.values
-    for threshold in thresholds:
-        reached = daily_values >= threshold
-        data[_threshold_column(threshold)] = np.array(
-            [int(reached[years == year].sum()) for year in unique_years],
-            dtype=int,
-        )
+    for scenario, daily_max in daily_max_by_scenario.items():
+        daily_values = daily_max.values
+        for threshold in thresholds:
+            reached = daily_values >= threshold
+            data[_threshold_column(threshold, scenario)] = np.array(
+                [int(reached[years == year].sum()) for year in unique_years],
+                dtype=int,
+            )
 
     return pd.DataFrame(data).sort_values("year").reset_index(drop=True)
 
@@ -44,6 +97,8 @@ def compute_threshold_day_counts_from_files(
     paths: Iterable[str | Path],
     thresholds: Iterable[float],
     variable: str | None = None,
+    city_buffer_km: float = 20.0,
+    airport_buffer_km: float = 10.0,
 ) -> pd.DataFrame:
     """Compute threshold counts by loading NetCDF files one at a time."""
     frames: list[pd.DataFrame] = []
@@ -53,7 +108,12 @@ def compute_threshold_day_counts_from_files(
             data_var = variable or _find_tasmax_variable(dataset)
             if data_var not in dataset:
                 raise KeyError(f"Variable {data_var!r} not found in {path}.")
-            frame = compute_threshold_day_counts(dataset[data_var], threshold_list)
+            frame = _compute_threshold_day_counts_for_dataset(
+                dataset[data_var],
+                threshold_list,
+                city_buffer_km,
+                airport_buffer_km,
+            )
             frames.append(frame)
 
     if not frames:
@@ -69,6 +129,37 @@ def compute_threshold_day_counts_from_files(
     return combined
 
 
+def _compute_threshold_day_counts_for_dataset(
+    tasmax: xr.DataArray,
+    thresholds: list[float],
+    city_buffer_km: float,
+    airport_buffer_km: float,
+) -> pd.DataFrame:
+    tasmax_c = normalize_to_celsius(tasmax)
+    if "time" not in tasmax_c.dims:
+        raise ValueError("TASMAX data must include a 'time' dimension.")
+
+    spatial_dims = tuple(dim for dim in tasmax_c.dims if dim != "time")
+    masks = build_default_scenario_masks(tasmax_c, city_buffer_km, airport_buffer_km)
+    values = tasmax_c.transpose("time", *spatial_dims).values
+    flat_values = values.reshape(values.shape[0], -1)
+    years = tasmax_c["time"].dt.year.values.astype(int)
+    unique_years = np.unique(years)
+
+    data: dict[str, np.ndarray] = {"year": unique_years}
+    for scenario, mask in masks.items():
+        flat_mask = mask.transpose(*spatial_dims).values.reshape(-1)
+        daily_max = np.nanmax(flat_values[:, flat_mask], axis=1)
+        for threshold in thresholds:
+            reached = daily_max >= threshold
+            data[_threshold_column(threshold, scenario)] = np.array(
+                [int(reached[years == year].sum()) for year in unique_years],
+                dtype=int,
+            )
+
+    return pd.DataFrame(data).sort_values("year").reset_index(drop=True)
+
+
 def write_threshold_counts_csv(metrics: pd.DataFrame, output_path: str | Path) -> None:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -79,32 +170,112 @@ def write_threshold_interactive_html(metrics: pd.DataFrame, output_path: str | P
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    thresholds = [
-        _column_threshold(column)
-        for column in metrics.columns
-        if column.startswith("days_ge_") and column.endswith("c")
-    ]
-    thresholds = sorted(thresholds)
+    parsed_columns = [_parse_threshold_column(column) for column in metrics.columns]
+    parsed_columns = [item for item in parsed_columns if item is not None]
+    scenarios = sorted({scenario for _, scenario in parsed_columns}, key=_scenario_sort_key)
+    thresholds = sorted({threshold for threshold, _ in parsed_columns})
     payload = {
         "years": metrics["year"].astype(int).tolist(),
         "thresholds": thresholds,
+        "scenarioLabels": {
+            "all": "Alle Rasterzellen",
+            "no_airports": "Flughafenumfeld ausgeschlossen",
+            "no_cities": "Großstadtumfeld ausgeschlossen",
+            "no_airports_no_cities": "Flughafen- und Großstadtumfeld ausgeschlossen",
+        },
         "series": {
-            _threshold_key(threshold): metrics[_threshold_column(threshold)].astype(int).tolist()
-            for threshold in thresholds
+            scenario: {
+                _threshold_key(threshold): metrics[_threshold_column(threshold, scenario)].astype(int).tolist()
+                for threshold in thresholds
+            }
+            for scenario in scenarios
         },
     }
 
     output.write_text(_html_template(payload), encoding="utf-8")
 
 
-def _threshold_column(threshold: float) -> str:
+def build_default_scenario_masks(
+    tasmax_c: xr.DataArray,
+    city_buffer_km: float = 20.0,
+    airport_buffer_km: float = 10.0,
+) -> dict[str, xr.DataArray]:
+    """Build raster masks for all checkbox combinations used by the HTML page."""
+    city_exclusion = _feature_exclusion_mask(tasmax_c, DEFAULT_CITY_FEATURES, city_buffer_km)
+    airport_exclusion = _feature_exclusion_mask(tasmax_c, DEFAULT_AIRPORT_FEATURES, airport_buffer_km)
+    full = xr.ones_like(city_exclusion, dtype=bool)
+    return {
+        "all": full,
+        "no_airports": ~airport_exclusion,
+        "no_cities": ~city_exclusion,
+        "no_airports_no_cities": ~(airport_exclusion | city_exclusion),
+    }
+
+
+def _full_spatial_mask(tasmax_c: xr.DataArray, spatial_dims: tuple[str, ...]) -> xr.DataArray:
+    template = tasmax_c.isel(time=0, drop=True) if "time" in tasmax_c.dims else tasmax_c
+    return xr.ones_like(template, dtype=bool).transpose(*spatial_dims)
+
+
+def _feature_exclusion_mask(
+    tasmax_c: xr.DataArray,
+    features: Iterable[ExclusionFeature],
+    radius_km: float,
+) -> xr.DataArray:
+    if radius_km < 0:
+        raise ValueError("Exclusion buffer radius must not be negative.")
+    if "lat" not in tasmax_c.coords or "lon" not in tasmax_c.coords:
+        raise ValueError("TASMAX data must include 'lat' and 'lon' coordinates for scenario masks.")
+
+    lat = tasmax_c["lat"]
+    lon = tasmax_c["lon"]
+    mask = xr.zeros_like(lat, dtype=bool)
+    for feature in features:
+        mask = mask | (_haversine_km(lat, lon, feature.lat, feature.lon) <= radius_km)
+    return mask
+
+
+def _haversine_km(lat: xr.DataArray, lon: xr.DataArray, center_lat: float, center_lon: float) -> xr.DataArray:
+    earth_radius_km = 6371.0088
+    lat1 = np.deg2rad(lat)
+    lon1 = np.deg2rad(lon)
+    lat2 = np.deg2rad(center_lat)
+    lon2 = np.deg2rad(center_lon)
+    delta_lat = lat1 - lat2
+    delta_lon = lon1 - lon2
+    a = np.sin(delta_lat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(delta_lon / 2.0) ** 2
+    return 2.0 * earth_radius_km * np.arcsin(np.sqrt(a))
+
+
+def _threshold_column(threshold: float, scenario: str = "all") -> str:
     value = f"{threshold:.1f}".replace(".", "_")
-    return f"days_ge_{value}c"
+    suffix = "" if scenario == "all" else f"__{scenario}"
+    return f"days_ge_{value}c{suffix}"
 
 
 def _column_threshold(column: str) -> float:
+    column = column.split("__", 1)[0]
     value = column.removeprefix("days_ge_").removesuffix("c").replace("_", ".")
     return float(value)
+
+
+def _parse_threshold_column(column: str) -> tuple[float, str] | None:
+    if not column.startswith("days_ge_"):
+        return None
+    base, _, scenario = column.partition("__")
+    if not base.endswith("c"):
+        return None
+    return _column_threshold(base), scenario or "all"
+
+
+def _scenario_sort_key(scenario: str) -> tuple[int, str]:
+    order = {
+        "all": 0,
+        "no_airports": 1,
+        "no_cities": 2,
+        "no_airports_no_cities": 3,
+    }
+    return order.get(scenario, 99), scenario
 
 
 def _threshold_key(threshold: float) -> str:
@@ -209,6 +380,37 @@ def _html_template(payload: dict[str, object]) -> str:
       width: 100%;
       accent-color: var(--accent);
     }}
+    .scenario-controls {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 8px 0 16px;
+    }}
+    .scenario-controls label {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 36px;
+      border: 1px solid #d8d8d2;
+      border-radius: 8px;
+      padding: 7px 10px;
+      background: #fbfbf8;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: none;
+      cursor: pointer;
+    }}
+    .scenario-controls input {{
+      width: 16px;
+      height: 16px;
+      accent-color: var(--accent);
+    }}
+    .scenario-note {{
+      margin: -4px 0 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
     .stats {{
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -301,6 +503,11 @@ def _html_template(payload: dict[str, object]) -> str:
         <output id="countLabel"></output>
         <input id="threshold" type="range">
       </div>
+      <div class="scenario-controls" aria-label="Rasterzellen ausschließen">
+        <label><input id="excludeAirports" type="checkbox"> Flughafenumfeld ausschließen</label>
+        <label><input id="excludeCities" type="checkbox"> Großstadtumfeld ausschließen</label>
+      </div>
+      <p id="scenarioLabel" class="scenario-note"></p>
       <svg id="chart" role="img" aria-label="Hitzetage pro Jahr nach Temperatur-Schwelle"></svg>
       <div class="stats">
         <div class="stat"><strong id="maxYear"></strong><span>Jahr mit den meisten Tagen</span></div>
@@ -315,6 +522,9 @@ def _html_template(payload: dict[str, object]) -> str:
     const slider = document.getElementById("threshold");
     const thresholdLabel = document.getElementById("thresholdLabel");
     const countLabel = document.getElementById("countLabel");
+    const excludeAirports = document.getElementById("excludeAirports");
+    const excludeCities = document.getElementById("excludeCities");
+    const scenarioLabel = document.getElementById("scenarioLabel");
     const maxYear = document.getElementById("maxYear");
     const latestValue = document.getElementById("latestValue");
     const trendValue = document.getElementById("trendValue");
@@ -331,11 +541,20 @@ def _html_template(payload: dict[str, object]) -> str:
       return DATA.thresholds[Number(slider.value)];
     }}
 
+    function activeScenario() {{
+      if (excludeAirports.checked && excludeCities.checked) return "no_airports_no_cities";
+      if (excludeAirports.checked) return "no_airports";
+      if (excludeCities.checked) return "no_cities";
+      return "all";
+    }}
+
     function render() {{
       const threshold = thresholdAtSlider();
-      const series = DATA.series[threshold.toFixed(1)];
+      const scenario = activeScenario();
+      const series = DATA.series[scenario][threshold.toFixed(1)];
       thresholdLabel.textContent = threshold.toFixed(1);
       countLabel.textContent = `Schwellen: ${{DATA.thresholds[0].toFixed(1)}}-${{DATA.thresholds.at(-1).toFixed(1)}} °C`;
+      scenarioLabel.textContent = `Aktive Datenbasis: ${{DATA.scenarioLabels[scenario] || scenario}}. Es wird weiterhin nur eine Balkenreihe angezeigt.`;
 
       const width = svg.clientWidth || 1000;
       const height = svg.clientHeight || 480;
@@ -379,7 +598,7 @@ def _html_template(payload: dict[str, object]) -> str:
 
       svg.querySelectorAll(".bar").forEach((bar) => {{
         bar.addEventListener("mousemove", (event) => {{
-          tooltip.textContent = `${{bar.dataset.year}}: ${{bar.dataset.value}} Tage >= ${{threshold.toFixed(1)}} °C`;
+          tooltip.textContent = `${{bar.dataset.year}}: ${{bar.dataset.value}} Tage >= ${{threshold.toFixed(1)}} °C (${{DATA.scenarioLabels[scenario] || scenario}})`;
           tooltip.style.left = `${{event.clientX}}px`;
           tooltip.style.top = `${{event.clientY}}px`;
           tooltip.style.opacity = 1;
@@ -410,6 +629,8 @@ def _html_template(payload: dict[str, object]) -> str:
     }}
 
     slider.addEventListener("input", render);
+    excludeAirports.addEventListener("change", render);
+    excludeCities.addEventListener("change", render);
     window.addEventListener("resize", render);
     render();
   </script>
