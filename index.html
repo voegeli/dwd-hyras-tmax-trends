@@ -110,6 +110,15 @@
       color: var(--muted);
       font-size: 13px;
     }
+    .method-note {
+      margin: 0 0 14px;
+      padding: 10px 12px;
+      border-left: 3px solid var(--accent);
+      background: #fff8ef;
+      color: #4f4b45;
+      font-size: 13px;
+      line-height: 1.42;
+    }
     .stats {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -207,6 +216,7 @@
         <label><input id="excludeCities" type="checkbox"> Großstadtumfeld ausschließen</label>
       </div>
       <p id="scenarioLabel" class="scenario-note"></p>
+      <p class="method-note">Sensitivitätsanalyse: ausgeschlossen werden HYRAS-Rasterzellen im 10-km-Puffer um 15 große Flughäfen und/oder im 20-km-Puffer um 15 Großstädte. Gezählt wird ein Tag weiterhin, sobald außerhalb der ausgeschlossenen Bereiche irgendwo in Deutschland mindestens eine Rasterzelle die gewählte Schwelle erreicht.</p>
       <svg id="chart" role="img" aria-label="Hitzetage pro Jahr nach Temperatur-Schwelle"></svg>
       <div class="stats">
         <div class="stat"><strong id="maxYear"></strong><span>Jahr mit den meisten Tagen</span></div>
