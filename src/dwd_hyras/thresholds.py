@@ -166,7 +166,11 @@ def write_threshold_counts_csv(metrics: pd.DataFrame, output_path: str | Path) -
     metrics.to_csv(output, index=False)
 
 
-def write_threshold_interactive_html(metrics: pd.DataFrame, output_path: str | Path) -> None:
+def write_threshold_interactive_html(
+    metrics: pd.DataFrame,
+    output_path: str | Path,
+    station_metrics: pd.DataFrame | None = None,
+) -> None:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -191,6 +195,21 @@ def write_threshold_interactive_html(metrics: pd.DataFrame, output_path: str | P
             for scenario in scenarios
         },
     }
+    if station_metrics is not None:
+        station_parsed_columns = [_parse_threshold_column(column) for column in station_metrics.columns]
+        station_parsed_columns = [item for item in station_parsed_columns if item is not None]
+        station_scenarios = sorted({scenario for _, scenario in station_parsed_columns}, key=_scenario_sort_key)
+        payload["stations"] = {
+            "years": station_metrics["year"].astype(int).tolist(),
+            "series": {
+                scenario: {
+                    _threshold_key(threshold): station_metrics[_threshold_column(threshold, scenario)].astype(int).tolist()
+                    for threshold in thresholds
+                    if _threshold_column(threshold, scenario) in station_metrics
+                }
+                for scenario in station_scenarios
+            },
+        }
 
     output.write_text(_html_template(payload), encoding="utf-8")
 
@@ -420,6 +439,13 @@ def _html_template(payload: dict[str, object]) -> str:
       font-size: 13px;
       line-height: 1.42;
     }}
+    .comparison-note {{
+      margin: 0 0 12px;
+      max-width: none;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.42;
+    }}
     .stats {{
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -438,6 +464,37 @@ def _html_template(payload: dict[str, object]) -> str:
     .stat span {{
       color: var(--muted);
       font-size: 13px;
+    }}
+    .legend {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .legend-item {{
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }}
+    .legend-swatch {{
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+      background: var(--accent);
+    }}
+    .legend-swatch.station {{
+      background: #4c78a8;
+    }}
+    .legend-line {{
+      width: 24px;
+      height: 0;
+      border-top: 3px solid var(--accent-dark);
+    }}
+    .legend-line.station {{
+      border-color: #4c78a8;
+      border-top-style: dashed;
     }}
     svg {{
       display: block;
@@ -461,10 +518,15 @@ def _html_template(payload: dict[str, object]) -> str:
     }}
     .grid path {{ display: none; }}
     .bar {{ fill: var(--accent); }}
+    .bar.station {{ fill: #4c78a8; }}
     .trend {{
       fill: none;
-      stroke: var(--line);
+      stroke: var(--accent-dark);
       stroke-width: 2.5;
+    }}
+    .trend.station {{
+      stroke: #4c78a8;
+      stroke-dasharray: 6 4;
     }}
     .tooltip {{
       position: fixed;
@@ -518,6 +580,8 @@ def _html_template(payload: dict[str, object]) -> str:
       </div>
       <p id="scenarioLabel" class="scenario-note"></p>
       <p class="method-note">Sensitivitätsanalyse: ausgeschlossen werden HYRAS-Rasterzellen im 10-km-Puffer um 15 große Flughäfen und/oder im 20-km-Puffer um 15 Großstädte. Gezählt wird ein Tag weiterhin, sobald außerhalb der ausgeschlossenen Bereiche irgendwo in Deutschland mindestens eine Rasterzelle die gewählte Schwelle erreicht.</p>
+      <div class="legend" id="legend" aria-label="Datenreihen"></div>
+      <p class="comparison-note">HYRAS deckt Deutschland als dichtes Raster ab; DWD-Stationen sind direkte Messungen an wenigen lang laufenden Stationsstandorten. Weil ein Hitzetag zählt, sobald irgendwo ein Punkt die Schwelle erreicht, liefert das dichtere Raster oft mehr Hitzetage als die Stationsauswahl.</p>
       <svg id="chart" role="img" aria-label="Hitzetage pro Jahr nach Temperatur-Schwelle"></svg>
       <div class="stats">
         <div class="stat"><strong id="maxYear"></strong><span>Jahr mit den meisten Tagen</span></div>
@@ -539,6 +603,7 @@ def _html_template(payload: dict[str, object]) -> str:
     const latestValue = document.getElementById("latestValue");
     const trendValue = document.getElementById("trendValue");
     const svg = document.getElementById("chart");
+    const legend = document.getElementById("legend");
     const tooltip = document.getElementById("tooltip");
 
     slider.min = 0;
@@ -562,9 +627,18 @@ def _html_template(payload: dict[str, object]) -> str:
       const threshold = thresholdAtSlider();
       const scenario = activeScenario();
       const series = DATA.series[scenario][threshold.toFixed(1)];
+      const stationSeries = stationSeriesForYears(threshold, scenario);
       thresholdLabel.textContent = threshold.toFixed(1);
       countLabel.textContent = `Schwellen: ${{DATA.thresholds[0].toFixed(1)}}-${{DATA.thresholds.at(-1).toFixed(1)}} °C`;
-      scenarioLabel.textContent = `Aktive Datenbasis: ${{DATA.scenarioLabels[scenario] || scenario}}. Es wird weiterhin nur eine Balkenreihe angezeigt.`;
+      scenarioLabel.textContent = stationSeries
+        ? `Aktive Datenbasis: ${{DATA.scenarioLabels[scenario] || scenario}}. DWD-Stationsdaten werden im gleichen Jahresraster daneben angezeigt.`
+        : `Aktive Datenbasis: ${{DATA.scenarioLabels[scenario] || scenario}}.`;
+      legend.innerHTML = `
+        <span class="legend-item"><span class="legend-swatch"></span>HYRAS-Raster</span>
+        ${{stationSeries ? `<span class="legend-item"><span class="legend-swatch station"></span>DWD-Stationen</span>` : ""}}
+        <span class="legend-item"><span class="legend-line"></span>HYRAS-Trend</span>
+        ${{stationSeries ? `<span class="legend-item"><span class="legend-line station"></span>DWD-Stationen-Trend</span>` : ""}}
+      `;
 
       const width = svg.clientWidth || 1000;
       const height = svg.clientHeight || 480;
@@ -572,9 +646,14 @@ def _html_template(payload: dict[str, object]) -> str:
       const innerWidth = width - margin.left - margin.right;
       const innerHeight = height - margin.top - margin.bottom;
       const years = DATA.years;
-      const maxY = Math.max(5, ...series);
+      const visibleValues = stationSeries ? series.concat(stationSeries.filter((value) => value !== null)) : series;
+      const maxY = Math.max(5, ...visibleValues);
       const yTop = Math.ceil(maxY / 10) * 10;
-      const barWidth = Math.max(2, innerWidth / years.length * 0.82);
+      const groupWidth = innerWidth / years.length * 0.86;
+      const barWidth = stationSeries ? Math.max(2, groupWidth * 0.42) : Math.max(2, groupWidth * 0.82);
+      const barGap = stationSeries ? Math.max(1, groupWidth * 0.08) : 0;
+      const hyrasOffset = stationSeries ? -(barWidth + barGap) / 2 : -barWidth / 2;
+      const stationOffset = (barWidth + barGap) / 2;
 
       const x = (year) => margin.left + ((year - years[0]) / (years.at(-1) - years[0])) * innerWidth;
       const y = (value) => margin.top + innerHeight - (value / yTop) * innerHeight;
@@ -585,6 +664,12 @@ def _html_template(payload: dict[str, object]) -> str:
       const trendPath = years
         .map((year, index) => `${{index === 0 ? "M" : "L"}} ${{x(year)}} ${{y(trend.intercept + trend.slope * year)}}`)
         .join(" ");
+      const stationTrend = stationSeries ? linearTrendForAvailableYears(years, stationSeries) : null;
+      const stationTrendPath = stationTrend
+        ? stationTrend.years
+          .map((year, index) => `${{index === 0 ? "M" : "L"}} ${{x(year)}} ${{y(stationTrend.intercept + stationTrend.slope * year)}}`)
+          .join(" ")
+        : "";
 
       svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
       svg.innerHTML = `
@@ -593,10 +678,12 @@ def _html_template(payload: dict[str, object]) -> str:
         </g>
         <g>
           ${{years.map((year, index) => `
-            <rect class="bar" x="${{x(year) - barWidth / 2}}" y="${{y(series[index])}}" width="${{barWidth}}" height="${{Math.max(0, margin.top + innerHeight - y(series[index]))}}" data-year="${{year}}" data-value="${{series[index]}}"></rect>
+            <rect class="bar" x="${{x(year) + hyrasOffset}}" y="${{y(series[index])}}" width="${{barWidth}}" height="${{Math.max(0, margin.top + innerHeight - y(series[index]))}}" data-year="${{year}}" data-value="${{series[index]}}" data-series-name="HYRAS-Raster"></rect>
+            ${{stationSeries && stationSeries[index] !== null ? `<rect class="bar station" x="${{x(year) + stationOffset}}" y="${{y(stationSeries[index])}}" width="${{barWidth}}" height="${{Math.max(0, margin.top + innerHeight - y(stationSeries[index]))}}" data-year="${{year}}" data-value="${{stationSeries[index]}}" data-series-name="DWD-Stationen"></rect>` : ""}}
           `).join("")}}
         </g>
         <path class="trend" d="${{trendPath}}"></path>
+        ${{stationTrendPath ? `<path class="trend station" d="${{stationTrendPath}}"></path>` : ""}}
         <g class="axis">
           <line x1="${{margin.left}}" x2="${{width - margin.right}}" y1="${{margin.top + innerHeight}}" y2="${{margin.top + innerHeight}}"></line>
           <line x1="${{margin.left}}" x2="${{margin.left}}" y1="${{margin.top}}" y2="${{margin.top + innerHeight}}"></line>
@@ -608,7 +695,7 @@ def _html_template(payload: dict[str, object]) -> str:
 
       svg.querySelectorAll(".bar").forEach((bar) => {{
         bar.addEventListener("mousemove", (event) => {{
-          tooltip.textContent = `${{bar.dataset.year}}: ${{bar.dataset.value}} Tage >= ${{threshold.toFixed(1)}} °C (${{DATA.scenarioLabels[scenario] || scenario}})`;
+          tooltip.textContent = `${{bar.dataset.year}}: ${{bar.dataset.value}} Tage >= ${{threshold.toFixed(1)}} °C (${{bar.dataset.seriesName}})`;
           tooltip.style.left = `${{event.clientX}}px`;
           tooltip.style.top = `${{event.clientY}}px`;
           tooltip.style.opacity = 1;
@@ -624,6 +711,18 @@ def _html_template(payload: dict[str, object]) -> str:
       trendValue.textContent = `${{(trend.slope * 10).toFixed(2)}} Tage`;
     }}
 
+    function stationSeriesForYears(threshold, scenario) {{
+      if (!DATA.stations) return null;
+      const sourceSeries =
+        DATA.stations.series[scenario]?.[threshold.toFixed(1)] ||
+        DATA.stations.series.all?.[threshold.toFixed(1)];
+      if (!sourceSeries) return null;
+
+      const byYear = new Map(DATA.stations.years.map((year, index) => [year, sourceSeries[index]]));
+      const aligned = DATA.years.map((year) => byYear.has(year) ? byYear.get(year) : null);
+      return aligned.some((value) => value !== null) ? aligned : null;
+    }}
+
     function linearTrend(xs, ys) {{
       const n = xs.length;
       const meanX = xs.reduce((sum, value) => sum + value, 0) / n;
@@ -636,6 +735,16 @@ def _html_template(payload: dict[str, object]) -> str:
       }}
       const slope = denominator === 0 ? 0 : numerator / denominator;
       return {{ slope, intercept: meanY - slope * meanX }};
+    }}
+
+    function linearTrendForAvailableYears(xs, ys) {{
+      const pairs = xs
+        .map((year, index) => [year, ys[index]])
+        .filter((pair) => pair[1] !== null);
+      if (pairs.length === 0) return null;
+      const years = pairs.map((pair) => pair[0]);
+      const values = pairs.map((pair) => pair[1]);
+      return {{ years, ...linearTrend(years, values) }};
     }}
 
     slider.addEventListener("input", render);
