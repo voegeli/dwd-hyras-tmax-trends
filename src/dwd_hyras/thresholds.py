@@ -166,7 +166,11 @@ def write_threshold_counts_csv(metrics: pd.DataFrame, output_path: str | Path) -
     metrics.to_csv(output, index=False)
 
 
-def write_threshold_interactive_html(metrics: pd.DataFrame, output_path: str | Path) -> None:
+def write_threshold_interactive_html(
+    metrics: pd.DataFrame,
+    output_path: str | Path,
+    station_metrics: pd.DataFrame | None = None,
+) -> None:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -191,6 +195,21 @@ def write_threshold_interactive_html(metrics: pd.DataFrame, output_path: str | P
             for scenario in scenarios
         },
     }
+    if station_metrics is not None:
+        station_parsed_columns = [_parse_threshold_column(column) for column in station_metrics.columns]
+        station_parsed_columns = [item for item in station_parsed_columns if item is not None]
+        station_scenarios = sorted({scenario for _, scenario in station_parsed_columns}, key=_scenario_sort_key)
+        payload["stations"] = {
+            "years": station_metrics["year"].astype(int).tolist(),
+            "series": {
+                scenario: {
+                    _threshold_key(threshold): station_metrics[_threshold_column(threshold, scenario)].astype(int).tolist()
+                    for threshold in thresholds
+                    if _threshold_column(threshold, scenario) in station_metrics
+                }
+                for scenario in station_scenarios
+            },
+        }
 
     output.write_text(_html_template(payload), encoding="utf-8")
 
@@ -406,6 +425,24 @@ def _html_template(payload: dict[str, object]) -> str:
       height: 16px;
       accent-color: var(--accent);
     }}
+    .language-control {{
+      display: flex;
+      justify-content: flex-end;
+      margin: 0 0 12px;
+    }}
+    .language-control label {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }}
+    .language-control select {{
+      border: 1px solid #d8d8d2;
+      border-radius: 8px;
+      padding: 7px 10px;
+      background: #fbfbf8;
+      color: var(--ink);
+      font: inherit;
+    }}
     .scenario-note {{
       margin: -4px 0 12px;
       color: var(--muted);
@@ -417,6 +454,13 @@ def _html_template(payload: dict[str, object]) -> str:
       border-left: 3px solid var(--accent);
       background: #fff8ef;
       color: #4f4b45;
+      font-size: 13px;
+      line-height: 1.42;
+    }}
+    .comparison-note {{
+      margin: 0 0 12px;
+      max-width: none;
+      color: var(--muted);
       font-size: 13px;
       line-height: 1.42;
     }}
@@ -438,6 +482,37 @@ def _html_template(payload: dict[str, object]) -> str:
     .stat span {{
       color: var(--muted);
       font-size: 13px;
+    }}
+    .legend {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .legend-item {{
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }}
+    .legend-swatch {{
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+      background: var(--accent);
+    }}
+    .legend-swatch.station {{
+      background: #4c78a8;
+    }}
+    .legend-line {{
+      width: 24px;
+      height: 0;
+      border-top: 3px solid var(--accent-dark);
+    }}
+    .legend-line.station {{
+      border-color: #4c78a8;
+      border-top-style: dashed;
     }}
     svg {{
       display: block;
@@ -461,10 +536,15 @@ def _html_template(payload: dict[str, object]) -> str:
     }}
     .grid path {{ display: none; }}
     .bar {{ fill: var(--accent); }}
+    .bar.station {{ fill: #4c78a8; }}
     .trend {{
       fill: none;
-      stroke: var(--line);
+      stroke: var(--accent-dark);
       stroke-width: 2.5;
+    }}
+    .trend.station {{
+      stroke: #4c78a8;
+      stroke-dasharray: 6 4;
     }}
     .tooltip {{
       position: fixed;
@@ -501,35 +581,123 @@ def _html_template(payload: dict[str, object]) -> str:
   <main>
     <header>
       <div>
-        <h1>HYRAS-Hitzetage nach Temperatur-Schwelle</h1>
-        <p>Gezählt werden Tage, an denen irgendwo in Deutschland mindestens eine gültige HYRAS-Rasterzelle die gewählte Tageshöchsttemperatur erreicht oder überschritten hat.</p>
+        <h1 id="pageTitle"></h1>
+        <p id="pageIntro"></p>
       </div>
       <div class="value"><span id="thresholdLabel"></span> °C</div>
     </header>
     <section class="panel">
+      <div class="language-control">
+        <label for="language"><span id="languageLabel"></span>
+          <select id="language" aria-label="Switch language">
+            <option value="de">Deutsch</option>
+            <option value="en">English</option>
+          </select>
+        </label>
+      </div>
       <div class="controls">
-        <label for="threshold">Lokale Tmax-Schwelle</label>
+        <label id="thresholdControlLabel" for="threshold"></label>
         <output id="countLabel"></output>
         <input id="threshold" type="range">
       </div>
-      <div class="scenario-controls" aria-label="Rasterzellen ausschließen">
-        <label><input id="excludeAirports" type="checkbox"> Flughafenumfeld ausschließen</label>
-        <label><input id="excludeCities" type="checkbox"> Großstadtumfeld ausschließen</label>
+      <div id="scenarioControls" class="scenario-controls" aria-label="">
+        <label><input id="excludeAirports" type="checkbox"> <span id="excludeAirportsLabel"></span></label>
+        <label><input id="excludeCities" type="checkbox"> <span id="excludeCitiesLabel"></span></label>
       </div>
       <p id="scenarioLabel" class="scenario-note"></p>
-      <p class="method-note">Sensitivitätsanalyse: ausgeschlossen werden HYRAS-Rasterzellen im 10-km-Puffer um 15 große Flughäfen und/oder im 20-km-Puffer um 15 Großstädte. Gezählt wird ein Tag weiterhin, sobald außerhalb der ausgeschlossenen Bereiche irgendwo in Deutschland mindestens eine Rasterzelle die gewählte Schwelle erreicht.</p>
-      <svg id="chart" role="img" aria-label="Hitzetage pro Jahr nach Temperatur-Schwelle"></svg>
+      <p id="methodNote" class="method-note"></p>
+      <div class="legend" id="legend" aria-label="Datenreihen"></div>
+      <p id="comparisonNote" class="comparison-note"></p>
+      <svg id="chart" role="img" aria-label=""></svg>
       <div class="stats">
-        <div class="stat"><strong id="maxYear"></strong><span>Jahr mit den meisten Tagen</span></div>
-        <div class="stat"><strong id="latestValue"></strong><span>Wert im letzten Jahr der Reihe</span></div>
-        <div class="stat"><strong id="trendValue"></strong><span>Linearer Trend pro Jahrzehnt</span></div>
+        <div class="stat"><strong id="maxYear"></strong><span id="maxYearLabel"></span></div>
+        <div class="stat"><strong id="latestValue"></strong><span id="latestValueLabel"></span></div>
+        <div class="stat"><strong id="trendValue"></strong><span id="trendValueLabel"></span></div>
       </div>
     </section>
   </main>
   <div id="tooltip" class="tooltip"></div>
   <script>
     const DATA = {data_json};
+    const TRANSLATIONS = {{
+      de: {{
+        documentTitle: "Hitzetage nach Schwelle",
+        pageTitle: "Hitzetage nach Temperatur-Schwelle",
+        pageIntro: "Gezählt werden Tage, an denen irgendwo in Deutschland mindestens eine gültige HYRAS-Rasterzelle die gewählte Tageshöchsttemperatur erreicht oder überschritten hat.",
+        languageLabel: "Sprache",
+        thresholdControlLabel: "Lokale Tmax-Schwelle",
+        scenarioControlsLabel: "Rasterzellen ausschließen",
+        excludeAirportsLabel: "Flughafenumfeld ausschließen",
+        excludeCitiesLabel: "Großstadtumfeld ausschließen",
+        methodNote: "Sensitivitätsanalyse: ausgeschlossen werden HYRAS-Rasterzellen im 10-km-Puffer um 15 große Flughäfen und/oder im 20-km-Puffer um 15 Großstädte. Gezählt wird ein Tag weiterhin, sobald außerhalb der ausgeschlossenen Bereiche irgendwo in Deutschland mindestens eine Rasterzelle die gewählte Schwelle erreicht.",
+        comparisonNote: "HYRAS deckt Deutschland als dichtes Raster ab; DWD-Stationen sind direkte Messungen an wenigen lang laufenden Stationsstandorten. Weil ein Hitzetag zählt, sobald irgendwo ein Punkt die Schwelle erreicht, liefert das dichtere Raster oft mehr Hitzetage als die Stationsauswahl.",
+        chartLabel: "Hitzetage pro Jahr nach Temperatur-Schwelle",
+        dataSeriesLabel: "Datenreihen",
+        thresholdRange: "Schwellen",
+        activeBasis: "Aktive Datenbasis",
+        stationScenarioSuffix: "DWD-Stationsdaten werden im gleichen Jahresraster daneben angezeigt.",
+        hyrasGrid: "HYRAS-Raster",
+        dwdStations: "DWD-Stationen",
+        hyrasTrend: "HYRAS-Trend",
+        stationTrend: "DWD-Stationen-Trend",
+        yAxis: "Tage pro Jahr",
+        days: "Tage",
+        tooltipJoin: "Tage >=",
+        maxYearLabel: "Jahr mit den meisten Tagen",
+        latestValueLabel: "Wert im letzten Jahr der Reihe",
+        trendValueLabel: "Linearer Trend pro Jahrzehnt",
+        scenarioLabels: {{
+          all: "Alle Rasterzellen",
+          no_airports: "Flughafenumfeld ausgeschlossen",
+          no_cities: "Großstadtumfeld ausgeschlossen",
+          no_airports_no_cities: "Flughafen- und Großstadtumfeld ausgeschlossen",
+        }},
+      }},
+      en: {{
+        documentTitle: "Hot days by threshold",
+        pageTitle: "Hot days by temperature threshold",
+        pageIntro: "Days are counted when at least one valid HYRAS grid cell anywhere in Germany reaches or exceeds the selected daily maximum temperature.",
+        languageLabel: "Language",
+        thresholdControlLabel: "Local Tmax threshold",
+        scenarioControlsLabel: "Exclude grid cells",
+        excludeAirportsLabel: "Exclude airport surroundings",
+        excludeCitiesLabel: "Exclude major-city surroundings",
+        methodNote: "Sensitivity analysis: HYRAS grid cells are excluded within a 10 km buffer around 15 major airports and/or within a 20 km buffer around 15 major cities. A day is still counted as soon as at least one grid cell outside the excluded areas reaches the selected threshold anywhere in Germany.",
+        comparisonNote: "HYRAS covers Germany as a dense grid; DWD stations are direct measurements at a smaller set of long-running station locations. Because a hot day is counted as soon as any point reaches the threshold, the denser grid often produces more hot days than the station selection.",
+        chartLabel: "Hot days per year by temperature threshold",
+        dataSeriesLabel: "Data series",
+        thresholdRange: "Thresholds",
+        activeBasis: "Active data basis",
+        stationScenarioSuffix: "DWD station data is shown next to it on the same yearly grid.",
+        hyrasGrid: "HYRAS grid",
+        dwdStations: "DWD stations",
+        hyrasTrend: "HYRAS trend",
+        stationTrend: "DWD station trend",
+        yAxis: "Days per year",
+        days: "days",
+        tooltipJoin: "days >=",
+        maxYearLabel: "Year with the most days",
+        latestValueLabel: "Value in the last year of the series",
+        trendValueLabel: "Linear trend per decade",
+        scenarioLabels: {{
+          all: "All grid cells",
+          no_airports: "Airport surroundings excluded",
+          no_cities: "Major-city surroundings excluded",
+          no_airports_no_cities: "Airport and major-city surroundings excluded",
+        }},
+      }},
+    }};
     const slider = document.getElementById("threshold");
+    const language = document.getElementById("language");
+    const pageTitle = document.getElementById("pageTitle");
+    const pageIntro = document.getElementById("pageIntro");
+    const languageLabel = document.getElementById("languageLabel");
+    const thresholdControlLabel = document.getElementById("thresholdControlLabel");
+    const scenarioControls = document.getElementById("scenarioControls");
+    const excludeAirportsLabel = document.getElementById("excludeAirportsLabel");
+    const excludeCitiesLabel = document.getElementById("excludeCitiesLabel");
+    const methodNote = document.getElementById("methodNote");
+    const comparisonNote = document.getElementById("comparisonNote");
     const thresholdLabel = document.getElementById("thresholdLabel");
     const countLabel = document.getElementById("countLabel");
     const excludeAirports = document.getElementById("excludeAirports");
@@ -538,7 +706,11 @@ def _html_template(payload: dict[str, object]) -> str:
     const maxYear = document.getElementById("maxYear");
     const latestValue = document.getElementById("latestValue");
     const trendValue = document.getElementById("trendValue");
+    const maxYearLabel = document.getElementById("maxYearLabel");
+    const latestValueLabel = document.getElementById("latestValueLabel");
+    const trendValueLabel = document.getElementById("trendValueLabel");
     const svg = document.getElementById("chart");
+    const legend = document.getElementById("legend");
     const tooltip = document.getElementById("tooltip");
 
     slider.min = 0;
@@ -558,13 +730,47 @@ def _html_template(payload: dict[str, object]) -> str:
       return "all";
     }}
 
+    function activeText() {{
+      return TRANSLATIONS[language.value] || TRANSLATIONS.de;
+    }}
+
+    function renderStaticText(text) {{
+      document.documentElement.lang = language.value;
+      document.title = text.documentTitle;
+      pageTitle.textContent = text.pageTitle;
+      pageIntro.textContent = text.pageIntro;
+      languageLabel.textContent = text.languageLabel;
+      thresholdControlLabel.textContent = text.thresholdControlLabel;
+      scenarioControls.setAttribute("aria-label", text.scenarioControlsLabel);
+      excludeAirportsLabel.textContent = text.excludeAirportsLabel;
+      excludeCitiesLabel.textContent = text.excludeCitiesLabel;
+      methodNote.textContent = text.methodNote;
+      comparisonNote.textContent = text.comparisonNote;
+      legend.setAttribute("aria-label", text.dataSeriesLabel);
+      svg.setAttribute("aria-label", text.chartLabel);
+      maxYearLabel.textContent = text.maxYearLabel;
+      latestValueLabel.textContent = text.latestValueLabel;
+      trendValueLabel.textContent = text.trendValueLabel;
+    }}
+
     function render() {{
+      const text = activeText();
+      renderStaticText(text);
       const threshold = thresholdAtSlider();
       const scenario = activeScenario();
       const series = DATA.series[scenario][threshold.toFixed(1)];
+      const stationSeries = stationSeriesForYears(threshold, scenario);
       thresholdLabel.textContent = threshold.toFixed(1);
-      countLabel.textContent = `Schwellen: ${{DATA.thresholds[0].toFixed(1)}}-${{DATA.thresholds.at(-1).toFixed(1)}} °C`;
-      scenarioLabel.textContent = `Aktive Datenbasis: ${{DATA.scenarioLabels[scenario] || scenario}}. Es wird weiterhin nur eine Balkenreihe angezeigt.`;
+      countLabel.textContent = `${{text.thresholdRange}}: ${{DATA.thresholds[0].toFixed(1)}}-${{DATA.thresholds.at(-1).toFixed(1)}} °C`;
+      scenarioLabel.textContent = stationSeries
+        ? `${{text.activeBasis}}: ${{text.scenarioLabels[scenario] || DATA.scenarioLabels[scenario] || scenario}}. ${{text.stationScenarioSuffix}}`
+        : `${{text.activeBasis}}: ${{text.scenarioLabels[scenario] || DATA.scenarioLabels[scenario] || scenario}}.`;
+      legend.innerHTML = `
+        <span class="legend-item"><span class="legend-swatch"></span>${{text.hyrasGrid}}</span>
+        ${{stationSeries ? `<span class="legend-item"><span class="legend-swatch station"></span>${{text.dwdStations}}</span>` : ""}}
+        <span class="legend-item"><span class="legend-line"></span>${{text.hyrasTrend}}</span>
+        ${{stationSeries ? `<span class="legend-item"><span class="legend-line station"></span>${{text.stationTrend}}</span>` : ""}}
+      `;
 
       const width = svg.clientWidth || 1000;
       const height = svg.clientHeight || 480;
@@ -572,9 +778,14 @@ def _html_template(payload: dict[str, object]) -> str:
       const innerWidth = width - margin.left - margin.right;
       const innerHeight = height - margin.top - margin.bottom;
       const years = DATA.years;
-      const maxY = Math.max(5, ...series);
+      const visibleValues = stationSeries ? series.concat(stationSeries.filter((value) => value !== null)) : series;
+      const maxY = Math.max(5, ...visibleValues);
       const yTop = Math.ceil(maxY / 10) * 10;
-      const barWidth = Math.max(2, innerWidth / years.length * 0.82);
+      const groupWidth = innerWidth / years.length * 0.86;
+      const barWidth = stationSeries ? Math.max(2, groupWidth * 0.42) : Math.max(2, groupWidth * 0.82);
+      const barGap = stationSeries ? Math.max(1, groupWidth * 0.08) : 0;
+      const hyrasOffset = stationSeries ? -(barWidth + barGap) / 2 : -barWidth / 2;
+      const stationOffset = (barWidth + barGap) / 2;
 
       const x = (year) => margin.left + ((year - years[0]) / (years.at(-1) - years[0])) * innerWidth;
       const y = (value) => margin.top + innerHeight - (value / yTop) * innerHeight;
@@ -585,6 +796,12 @@ def _html_template(payload: dict[str, object]) -> str:
       const trendPath = years
         .map((year, index) => `${{index === 0 ? "M" : "L"}} ${{x(year)}} ${{y(trend.intercept + trend.slope * year)}}`)
         .join(" ");
+      const stationTrend = stationSeries ? linearTrendForAvailableYears(years, stationSeries) : null;
+      const stationTrendPath = stationTrend
+        ? stationTrend.years
+          .map((year, index) => `${{index === 0 ? "M" : "L"}} ${{x(year)}} ${{y(stationTrend.intercept + stationTrend.slope * year)}}`)
+          .join(" ")
+        : "";
 
       svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
       svg.innerHTML = `
@@ -593,22 +810,24 @@ def _html_template(payload: dict[str, object]) -> str:
         </g>
         <g>
           ${{years.map((year, index) => `
-            <rect class="bar" x="${{x(year) - barWidth / 2}}" y="${{y(series[index])}}" width="${{barWidth}}" height="${{Math.max(0, margin.top + innerHeight - y(series[index]))}}" data-year="${{year}}" data-value="${{series[index]}}"></rect>
+            <rect class="bar" x="${{x(year) + hyrasOffset}}" y="${{y(series[index])}}" width="${{barWidth}}" height="${{Math.max(0, margin.top + innerHeight - y(series[index]))}}" data-year="${{year}}" data-value="${{series[index]}}" data-series-name="${{text.hyrasGrid}}"></rect>
+            ${{stationSeries && stationSeries[index] !== null ? `<rect class="bar station" x="${{x(year) + stationOffset}}" y="${{y(stationSeries[index])}}" width="${{barWidth}}" height="${{Math.max(0, margin.top + innerHeight - y(stationSeries[index]))}}" data-year="${{year}}" data-value="${{stationSeries[index]}}" data-series-name="${{text.dwdStations}}"></rect>` : ""}}
           `).join("")}}
         </g>
         <path class="trend" d="${{trendPath}}"></path>
+        ${{stationTrendPath ? `<path class="trend station" d="${{stationTrendPath}}"></path>` : ""}}
         <g class="axis">
           <line x1="${{margin.left}}" x2="${{width - margin.right}}" y1="${{margin.top + innerHeight}}" y2="${{margin.top + innerHeight}}"></line>
           <line x1="${{margin.left}}" x2="${{margin.left}}" y1="${{margin.top}}" y2="${{margin.top + innerHeight}}"></line>
           ${{ticksY.map((tick) => `<text x="${{margin.left - 10}}" y="${{y(tick) + 4}}" text-anchor="end">${{tick}}</text>`).join("")}}
           ${{ticksX.map((tick) => `<text x="${{x(tick)}}" y="${{height - 12}}" text-anchor="middle">${{tick}}</text>`).join("")}}
-          <text x="${{margin.left}}" y="15">Tage pro Jahr</text>
+          <text x="${{margin.left}}" y="15">${{text.yAxis}}</text>
         </g>
       `;
 
       svg.querySelectorAll(".bar").forEach((bar) => {{
         bar.addEventListener("mousemove", (event) => {{
-          tooltip.textContent = `${{bar.dataset.year}}: ${{bar.dataset.value}} Tage >= ${{threshold.toFixed(1)}} °C (${{DATA.scenarioLabels[scenario] || scenario}})`;
+          tooltip.textContent = `${{bar.dataset.year}}: ${{bar.dataset.value}} ${{text.tooltipJoin}} ${{threshold.toFixed(1)}} °C (${{bar.dataset.seriesName}})`;
           tooltip.style.left = `${{event.clientX}}px`;
           tooltip.style.top = `${{event.clientY}}px`;
           tooltip.style.opacity = 1;
@@ -619,9 +838,21 @@ def _html_template(payload: dict[str, object]) -> str:
       }});
 
       const maxIndex = series.reduce((best, value, index) => value > series[best] ? index : best, 0);
-      maxYear.textContent = `${{years[maxIndex]}}: ${{series[maxIndex]}} Tage`;
-      latestValue.textContent = `${{years.at(-1)}}: ${{series.at(-1)}} Tage`;
-      trendValue.textContent = `${{(trend.slope * 10).toFixed(2)}} Tage`;
+      maxYear.textContent = `${{years[maxIndex]}}: ${{series[maxIndex]}} ${{text.days}}`;
+      latestValue.textContent = `${{years.at(-1)}}: ${{series.at(-1)}} ${{text.days}}`;
+      trendValue.textContent = `${{(trend.slope * 10).toFixed(2)}} ${{text.days}}`;
+    }}
+
+    function stationSeriesForYears(threshold, scenario) {{
+      if (!DATA.stations) return null;
+      const sourceSeries =
+        DATA.stations.series[scenario]?.[threshold.toFixed(1)] ||
+        DATA.stations.series.all?.[threshold.toFixed(1)];
+      if (!sourceSeries) return null;
+
+      const byYear = new Map(DATA.stations.years.map((year, index) => [year, sourceSeries[index]]));
+      const aligned = DATA.years.map((year) => byYear.has(year) ? byYear.get(year) : null);
+      return aligned.some((value) => value !== null) ? aligned : null;
     }}
 
     function linearTrend(xs, ys) {{
@@ -638,7 +869,18 @@ def _html_template(payload: dict[str, object]) -> str:
       return {{ slope, intercept: meanY - slope * meanX }};
     }}
 
+    function linearTrendForAvailableYears(xs, ys) {{
+      const pairs = xs
+        .map((year, index) => [year, ys[index]])
+        .filter((pair) => pair[1] !== null);
+      if (pairs.length === 0) return null;
+      const years = pairs.map((pair) => pair[0]);
+      const values = pairs.map((pair) => pair[1]);
+      return {{ years, ...linearTrend(years, values) }};
+    }}
+
     slider.addEventListener("input", render);
+    language.addEventListener("change", render);
     excludeAirports.addEventListener("change", render);
     excludeCities.addEventListener("change", render);
     window.addEventListener("resize", render);
