@@ -114,6 +114,11 @@ def test_threshold_html_renders_station_data_in_the_main_chart(tmp_path):
     assert 'class="trend station"' in html
     assert "HYRAS-Trend" in html
     assert "DWD-Stationen-Trend" in html
+    assert 'id="language"' in html
+    assert "const TRANSLATIONS" in html
+    assert "Hot days by temperature threshold" in html
+    assert "HYRAS and DWD station hot days by temperature threshold" not in html
+    assert "Switch language" in html
 
 
 def test_station_threshold_counts_apply_airport_and_city_filters(tmp_path):
